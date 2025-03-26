@@ -33,6 +33,7 @@ import java.util.*;
  * 1. 生成调用图
  * 2. 生成Jimple IR
  * 3. 创建代码索引（字段、方法的定义和引用）
+ * 4. 提取方法源码
  */
 public class SootCodeAnalyzer {
     private static final Logger logger = LoggerFactory.getLogger(SootCodeAnalyzer.class);
@@ -45,6 +46,9 @@ public class SootCodeAnalyzer {
     private boolean generateCFG = false;
     private String targetClassName = null;
     private String targetMethodName = null;
+    private String methodSignature = null;
+    private boolean extractMethodSource = false;
+    private String sourcePath = null;
 
     // 存储索引信息
     private final Map<String, List<IndexEntry>> methodDefinitions = new HashMap<>();
@@ -164,7 +168,16 @@ public class SootCodeAnalyzer {
     public void analyze() {
         logger.info("开始分析目标代码：{}", targetPath);
 
-        // 初始化Soot
+        // 提取方法源码
+        if (extractMethodSource && methodSignature != null && sourcePath != null) {
+            logger.info("使用提取源码模式");
+            // 创建输出目录
+            createOutputDirectory();
+            extractMethodSource();
+            return; // 如果只是提取方法源码，完成后直接返回
+        }
+
+        // 以下是普通分析模式，需要初始化Soot
         initializeSoot();
 
         // 创建输出目录
@@ -194,6 +207,63 @@ public class SootCodeAnalyzer {
         }
 
         logger.info("分析完成");
+    }
+
+    /**
+     * 提取方法源码并保存到文件
+     */
+    private void extractMethodSource() {
+        logger.info("开始提取方法源码：{}", methodSignature);
+        
+        try {
+            // 使用SpoonMethodSourceExtractor提取源码
+            SpoonMethodSourceExtractor extractor = new SpoonMethodSourceExtractor(sourcePath);
+            
+            // 创建输出路径
+            Path methodOutputPath = Paths.get(outputPath, "method_source");
+            Files.createDirectories(methodOutputPath);
+            
+            // 方法签名转换为文件名
+            String safeFileName = getSafeFileName(methodSignature);
+            Path outputFile = methodOutputPath.resolve(safeFileName + ".java");
+            
+            // 提取方法源码并写入文件
+            boolean success = extractor.writeMethodSourceToFile(methodSignature, outputFile.toString());
+            
+            if (success) {
+                logger.info("方法源码已保存到：{}", outputFile);
+            } else {
+                logger.error("提取方法源码失败");
+            }
+        } catch (Exception e) {
+            logger.error("提取方法源码时出错：{}", e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * 根据方法签名生成安全的文件名
+     */
+    private String getSafeFileName(String methodSignature) {
+        // 移除<>符号（如果存在）
+        if (methodSignature.startsWith("<") && methodSignature.endsWith(">")) {
+            methodSignature = methodSignature.substring(1, methodSignature.length() - 1);
+        }
+        
+        // 替换不安全的文件名字符
+        return methodSignature
+                .replace(":", "_")
+                .replace(" ", "_")
+                .replace("(", "_")
+                .replace(")", "_")
+                .replace(",", "_")
+                .replace(".", "_")
+                .replace("<", "_")
+                .replace(">", "_")
+                .replace("[", "_")
+                .replace("]", "_")
+                .replace("/", "_")
+                .replace("\\", "_");
     }
 
     /**
@@ -1445,21 +1515,143 @@ public class SootCodeAnalyzer {
     public static void main(String[] args) {
         // 创建命令行选项
         org.apache.commons.cli.Options cliOptions = new org.apache.commons.cli.Options();
+        HelpFormatter formatter = new HelpFormatter();
+        
+        // 首先检查参数中是否包含"extract"或"help"选项
+        boolean isExtractMode = false;
+        boolean isHelpMode = false;
+        
+        for (String arg : args) {
+            if (arg.equals("-extract") || arg.equals("--extract-method")) {
+                isExtractMode = true;
+            }
+            if (arg.equals("-h") || arg.equals("--help")) {
+                isHelpMode = true;
+            }
+        }
+        
+        // 如果是帮助模式，显示所有选项
+        if (isHelpMode) {
+            addAllOptions(cliOptions);
+            formatter.printHelp("SootCodeAnalyzer", cliOptions);
+            return;
+        }
+        
+        // 根据模式添加不同的必选参数
+        if (isExtractMode) {
+            // 提取源码模式下，只有-o、-s和-m是必选的
+            cliOptions.addOption(Option.builder("o")
+                    .longOpt("output")
+                    .desc("输出目录")
+                    .hasArg()
+                    .required(true)
+                    .build());
+                    
+            cliOptions.addOption(Option.builder("s")
+                    .longOpt("source-path")
+                    .desc("源代码路径，用于提取方法源码")
+                    .hasArg()
+                    .required(true)
+                    .build());
+                    
+            cliOptions.addOption(Option.builder("m")
+                    .longOpt("method-signature")
+                    .desc("方法签名，用于提取方法源码")
+                    .hasArg()
+                    .required(true)
+                    .build());
+                    
+            cliOptions.addOption(Option.builder("t")
+                    .longOpt("target")
+                    .desc("目标Java项目路径（提取源码模式下可选）")
+                    .hasArg()
+                    .build());
+            
+            // 添加提取源码选项
+            cliOptions.addOption(Option.builder("extract")
+                    .longOpt("extract-method")
+                    .desc("提取方法源码")
+                    .build());
+        } else {
+            // 普通分析模式下，-t和-o是必选的
+            cliOptions.addOption(Option.builder("t")
+                    .longOpt("target")
+                    .desc("目标Java项目路径")
+                    .hasArg()
+                    .required(true)
+                    .build());
+                    
+            cliOptions.addOption(Option.builder("o")
+                    .longOpt("output")
+                    .desc("输出目录")
+                    .hasArg()
+                    .required(true)
+                    .build());
+        }
+        
+        // 添加其他所有选项
+        addRemainingOptions(cliOptions, isExtractMode);
 
+        CommandLineParser parser = new DefaultParser();
+
+        try {
+            // 解析完整命令行参数
+            CommandLine cmd = parser.parse(cliOptions, args);
+
+            // 获取必要参数
+            String outputPath = cmd.getOptionValue("o");
+            String targetPath = cmd.getOptionValue("t", ""); // 提取模式下可能为空
+            
+            // 创建分析器
+            SootCodeAnalyzer analyzer = new SootCodeAnalyzer(targetPath, outputPath);
+
+            // 设置选项
+            analyzer.setGenerateCallGraph(cmd.hasOption("c"));
+            analyzer.setGenerateJimple(cmd.hasOption("j"));
+            analyzer.setGenerateIndex(cmd.hasOption("i"));
+            analyzer.setGeneratePointsToAnalysis(cmd.hasOption("p"));
+            analyzer.setGenerateCFG(cmd.hasOption("cfg"));
+            
+            // 设置目标类和方法
+            if (cmd.hasOption("class")) {
+                analyzer.setTargetClassName(cmd.getOptionValue("class"));
+            }
+            if (cmd.hasOption("method")) {
+                analyzer.setTargetMethodName(cmd.getOptionValue("method"));
+            }
+            
+            // 设置提取方法源码相关选项
+            if (cmd.hasOption("extract")) {
+                analyzer.setExtractMethodSource(true);
+                analyzer.setMethodSignature(cmd.getOptionValue("m"));
+                analyzer.setSourcePath(cmd.getOptionValue("s"));
+            }
+
+            // 执行分析
+            analyzer.analyze();
+
+        } catch (ParseException e) {
+            System.err.println("解析命令行参数出错：" + e.getMessage());
+            formatter.printHelp("SootCodeAnalyzer", cliOptions);
+        }
+    }
+    
+    /**
+     * 添加所有命令行选项
+     */
+    private static void addAllOptions(org.apache.commons.cli.Options cliOptions) {
         cliOptions.addOption(Option.builder("t")
                 .longOpt("target")
                 .desc("目标Java项目路径")
                 .hasArg()
-                .required(true)
                 .build());
-
+                
         cliOptions.addOption(Option.builder("o")
                 .longOpt("output")
                 .desc("输出目录")
                 .hasArg()
-                .required(true)
                 .build());
-
+                
         cliOptions.addOption(Option.builder("c")
                 .longOpt("callgraph")
                 .desc("生成调用图")
@@ -1497,57 +1689,95 @@ public class SootCodeAnalyzer {
                 .hasArg()
                 .build());
 
+        cliOptions.addOption(Option.builder("m")
+                .longOpt("method-signature")
+                .desc("方法签名，用于提取方法源码")
+                .hasArg()
+                .build());
+
+        cliOptions.addOption(Option.builder("s")
+                .longOpt("source-path")
+                .desc("源代码路径，用于提取方法源码")
+                .hasArg()
+                .build());
+
+        cliOptions.addOption(Option.builder("extract")
+                .longOpt("extract-method")
+                .desc("提取方法源码")
+                .build());
+
         cliOptions.addOption(Option.builder("h")
                 .longOpt("help")
                 .desc("显示帮助信息")
                 .build());
-
-        CommandLineParser parser = new DefaultParser();
-        HelpFormatter formatter = new HelpFormatter();
-
-        // 先检查是否有帮助选项
-        try {
-            CommandLine cmd = parser.parse(new org.apache.commons.cli.Options().addOption("h", "help", false, ""), args, true);
-            if (cmd.hasOption('h')) {
-                formatter.printHelp("SootCodeAnalyzer", cliOptions);
-                return;
-            }
-        } catch (ParseException e) {
-            // 忽略，继续解析完整选项
+    }
+    
+    /**
+     * 添加除必选项外的其他选项
+     */
+    private static void addRemainingOptions(org.apache.commons.cli.Options cliOptions, boolean isExtractMode) {
+        // 在提取模式下，这些选项已经添加过了
+        if (!isExtractMode) {
+            cliOptions.addOption(Option.builder("m")
+                    .longOpt("method-signature")
+                    .desc("方法签名，用于提取方法源码")
+                    .hasArg()
+                    .build());
+                    
+            cliOptions.addOption(Option.builder("s")
+                    .longOpt("source-path")
+                    .desc("源代码路径，用于提取方法源码")
+                    .hasArg()
+                    .build());
         }
+        
+        // 公共选项
+        cliOptions.addOption(Option.builder("c")
+                .longOpt("callgraph")
+                .desc("生成调用图")
+                .build());
 
-        try {
-            // 解析完整命令行参数
-            CommandLine cmd = parser.parse(cliOptions, args);
+        cliOptions.addOption(Option.builder("j")
+                .longOpt("jimple")
+                .desc("生成Jimple IR")
+                .build());
 
-            String targetPath = cmd.getOptionValue("t");
-            String outputPath = cmd.getOptionValue("o");
+        cliOptions.addOption(Option.builder("i")
+                .longOpt("index")
+                .desc("生成代码索引")
+                .build());
 
-            // 创建分析器
-            SootCodeAnalyzer analyzer = new SootCodeAnalyzer(targetPath, outputPath);
+        cliOptions.addOption(Option.builder("p")
+                .longOpt("points-to")
+                .desc("执行指针分析")
+                .build());
 
-            // 设置选项
-            analyzer.setGenerateCallGraph(cmd.hasOption("c"));
-            analyzer.setGenerateJimple(cmd.hasOption("j"));
-            analyzer.setGenerateIndex(cmd.hasOption("i"));
-            analyzer.setGeneratePointsToAnalysis(cmd.hasOption("p"));
-            analyzer.setGenerateCFG(cmd.hasOption("cfg"));
-            
-            // 设置目标类和方法
-            if (cmd.hasOption("class")) {
-                analyzer.setTargetClassName(cmd.getOptionValue("class"));
-            }
-            if (cmd.hasOption("method")) {
-                analyzer.setTargetMethodName(cmd.getOptionValue("method"));
-            }
+        cliOptions.addOption(Option.builder("cfg")
+                .longOpt("control-flow-graph")
+                .desc("生成控制流图")
+                .build());
 
-            // 执行分析
-            analyzer.analyze();
+        cliOptions.addOption(Option.builder("class")
+                .longOpt("target-class")
+                .desc("目标类名")
+                .hasArg()
+                .build());
 
-        } catch (ParseException e) {
-            System.err.println("解析命令行参数出错：" + e.getMessage());
-            formatter.printHelp("SootCodeAnalyzer", cliOptions);
-        }
+        cliOptions.addOption(Option.builder("method")
+                .longOpt("target-method")
+                .desc("目标方法名")
+                .hasArg()
+                .build());
+
+        cliOptions.addOption(Option.builder("extract")
+                .longOpt("extract-method")
+                .desc("提取方法源码")
+                .build());
+
+        cliOptions.addOption(Option.builder("h")
+                .longOpt("help")
+                .desc("显示帮助信息")
+                .build());
     }
 
     /**
@@ -1597,5 +1827,17 @@ public class SootCodeAnalyzer {
      */
     public void setTargetMethodName(String targetMethodName) {
         this.targetMethodName = targetMethodName;
+    }
+    
+    public void setMethodSignature(String methodSignature) {
+        this.methodSignature = methodSignature;
+    }
+    
+    public void setSourcePath(String sourcePath) {
+        this.sourcePath = sourcePath;
+    }
+    
+    public void setExtractMethodSource(boolean extractMethodSource) {
+        this.extractMethodSource = extractMethodSource;
     }
 }
