@@ -15,6 +15,9 @@ import soot.tagkit.LineNumberTag;
 import soot.tagkit.SourceFileTag;
 import soot.toolkits.graph.DirectedGraph;
 import soot.toolkits.graph.ExceptionalUnitGraph;
+import soot.toolkits.graph.UnitGraph;
+import soot.toolkits.graph.BriefUnitGraph;
+import soot.util.dot.DotGraph;
 
 import java.io.File;
 import java.io.FileWriter;
@@ -39,6 +42,9 @@ public class SootCodeAnalyzer {
     private boolean generateJimple = false;
     private boolean generateIndex = false;
     private boolean generatePointsToAnalysis = false;
+    private boolean generateCFG = false;
+    private String targetClassName = null;
+    private String targetMethodName = null;
 
     // 存储索引信息
     private final Map<String, List<IndexEntry>> methodDefinitions = new HashMap<>();
@@ -175,6 +181,11 @@ public class SootCodeAnalyzer {
         // 生成指针分析结果
         if (generatePointsToAnalysis) {
             generatePointsToAnalysis();
+        }
+
+        // 生成控制流图
+        if (generateCFG) {
+            generateCFG();
         }
 
         // 保存分析结果
@@ -1349,6 +1360,86 @@ public class SootCodeAnalyzer {
     }
 
     /**
+     * 生成控制流图
+     */
+    private void generateCFG() {
+        logger.info("生成控制流图...");
+
+        if (targetClassName == null || targetMethodName == null) {
+            logger.error("未指定目标类名和方法名");
+            return;
+        }
+
+        try {
+            // 加载目标类
+            SootClass targetClass = Scene.v().loadClassAndSupport(targetClassName);
+            targetClass.setApplicationClass();
+
+            // 获取目标方法
+            SootMethod targetMethod = targetClass.getMethodByName(targetMethodName);
+            if (targetMethod == null) {
+                logger.error("未找到方法: {}.{}", targetClassName, targetMethodName);
+                return;
+            }
+
+            // 获取方法体
+            Body body = targetMethod.retrieveActiveBody();
+            UnitGraph cfg = new BriefUnitGraph(body);
+
+            // 创建DOT图
+            DotGraph dotGraph = new DotGraph("CFG_" + targetClassName + "_" + targetMethodName);
+
+            // 添加节点
+            for (Unit unit : cfg) {
+                String nodeName = unit.toString();
+                dotGraph.drawNode(nodeName);
+
+                // 添加边
+                List<Unit> succs = cfg.getSuccsOf(unit);
+                for (Unit succ : succs) {
+                    dotGraph.drawEdge(nodeName, succ.toString());
+                }
+            }
+
+            // 保存DOT文件
+            Path cfgDir = Paths.get(outputPath, "cfg");
+            if (!Files.exists(cfgDir)) {
+                Files.createDirectories(cfgDir);
+            }
+
+            String fileName = String.format("%s_%s.dot", targetClassName.replace(".", "_"), targetMethodName);
+            Path filePath = cfgDir.resolve(fileName);
+            dotGraph.plot(filePath.toString());
+
+            logger.info("控制流图已生成到: {}", filePath);
+
+            // 打印方法信息
+            logger.info("\n方法信息:");
+            logger.info("方法名: {}", targetMethod.getName());
+            logger.info("参数数量: {}", targetMethod.getParameterCount());
+            logger.info("返回类型: {}", targetMethod.getReturnType());
+
+            logger.info("\n控制流图信息:");
+            logger.info("节点数量: {}", cfg.size());
+            logger.info("边数量: {}", countEdges(cfg));
+
+        } catch (Exception e) {
+            logger.error("生成控制流图失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 计算控制流图的边数
+     */
+    private int countEdges(UnitGraph cfg) {
+        int edgeCount = 0;
+        for (Unit unit : cfg) {
+            edgeCount += cfg.getSuccsOf(unit).size();
+        }
+        return edgeCount;
+    }
+
+    /**
      * 主方法
      */
     public static void main(String[] args) {
@@ -1389,6 +1480,23 @@ public class SootCodeAnalyzer {
                 .desc("执行指针分析")
                 .build());
 
+        cliOptions.addOption(Option.builder("cfg")
+                .longOpt("control-flow-graph")
+                .desc("生成控制流图")
+                .build());
+
+        cliOptions.addOption(Option.builder("class")
+                .longOpt("target-class")
+                .desc("目标类名")
+                .hasArg()
+                .build());
+
+        cliOptions.addOption(Option.builder("method")
+                .longOpt("target-method")
+                .desc("目标方法名")
+                .hasArg()
+                .build());
+
         cliOptions.addOption(Option.builder("h")
                 .longOpt("help")
                 .desc("显示帮助信息")
@@ -1423,6 +1531,15 @@ public class SootCodeAnalyzer {
             analyzer.setGenerateJimple(cmd.hasOption("j"));
             analyzer.setGenerateIndex(cmd.hasOption("i"));
             analyzer.setGeneratePointsToAnalysis(cmd.hasOption("p"));
+            analyzer.setGenerateCFG(cmd.hasOption("cfg"));
+            
+            // 设置目标类和方法
+            if (cmd.hasOption("class")) {
+                analyzer.setTargetClassName(cmd.getOptionValue("class"));
+            }
+            if (cmd.hasOption("method")) {
+                analyzer.setTargetMethodName(cmd.getOptionValue("method"));
+            }
 
             // 执行分析
             analyzer.analyze();
@@ -1459,5 +1576,26 @@ public class SootCodeAnalyzer {
      */
     public void setGeneratePointsToAnalysis(boolean generatePointsToAnalysis) {
         this.generatePointsToAnalysis = generatePointsToAnalysis;
+    }
+
+    /**
+     * 设置是否生成控制流图
+     */
+    public void setGenerateCFG(boolean generateCFG) {
+        this.generateCFG = generateCFG;
+    }
+
+    /**
+     * 设置目标类名
+     */
+    public void setTargetClassName(String targetClassName) {
+        this.targetClassName = targetClassName;
+    }
+
+    /**
+     * 设置目标方法名
+     */
+    public void setTargetMethodName(String targetMethodName) {
+        this.targetMethodName = targetMethodName;
     }
 }
